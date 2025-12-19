@@ -1,0 +1,131 @@
+VARIANT = 8
+INPUT_FILENAME = "task_rcs_02.txt"
+OUTPUT_FORMAT_CODE = 2
+OUTPUT_FILENAME = f"rcs_results_variant_{VARIANT:02d}.csv"
+NUM_POINTS = 500
+import sys
+from typing import Optional, Tuple
+import numpy as np
+from scipy.special import spherical_jn, spherical_yn
+from scipy import constants as const
+import csv
+import matplotlib.pyplot as plt
+
+def load_parameters(variant_num: int, filename: str) -> Optional[Tuple[float, float, float]]:
+    print(f"Загрузка параметров для варианта {variant_num} из файла '{filename}'...")
+    try:
+        with open(filename, 'r') as f:
+            for line in f:
+                if line.strip().startswith('#') or not line.strip():
+                    continue
+                parts = line.split()
+                if not parts:
+                    continue
+                try:
+                    if int(parts[0]) == variant_num:
+                        # D - parts[1], fmin - parts[2], fmax - parts[3]
+                        diameter = float(parts[1])
+                        freq_min = float(parts[2])
+                        freq_max = float(parts[3])
+                        print(f"  Найдены параметры: D={diameter} м, f_min={freq_min/1e6} МГц, f_max={freq_max/1e6} МГц")
+                        return diameter, freq_min, freq_max
+                except (ValueError, IndexError):
+                    continue
+    except FileNotFoundError:
+        print(f"ОШИБКА: Файл с параметрами '{filename}' не найден.", file=sys.stderr)
+        return None
+    except Exception as e:
+        print(f"ОШИБКА: Не удалось прочитать файл '{filename}': {e}", file=sys.stderr)
+        return None
+    print(f"ОШИБКА: Вариант {variant_num} не найден в файле '{filename}'.", file=sys.stderr)
+    return None
+
+class RcsCalculator:
+    def __init__(self, diameter: float):
+        self.radius = diameter / 2.0
+        self.c = const.c
+        print(f"Калькулятор ЭПР создан (Радиус = {self.radius} м).")
+
+    def calculate_rcs(self, frequency: float) -> float:
+        if frequency <= 0:
+            return 0.0
+        lambda_ = self.c / frequency
+        k = 2 * np.pi / lambda_
+        kr = k * self.radius
+        n_max = int(2 + kr + 4.05 * (kr)**(1/3))
+        n = np.arange(1, n_max + 1)
+
+        jn_kr = spherical_jn(n, kr)
+        jn_kr_minus_1 = spherical_jn(n - 1, kr)
+        yn_kr = spherical_yn(n, kr)
+        yn_kr_minus_1 = spherical_yn(n - 1, kr)
+
+        hn_kr = jn_kr + 1j * yn_kr
+        hn_kr_minus_1 = jn_kr_minus_1 + 1j * yn_kr_minus_1
+
+        a_n = jn_kr / hn_kr
+        b_n = (kr * jn_kr_minus_1 - n * jn_kr) / (kr * hn_kr_minus_1 - n * hn_kr)
+
+        term = (-1)**n * (n + 0.5) * (b_n - a_n)
+        total_sum = np.sum(term)
+
+        sigma = (lambda_**2 / np.pi) * (np.abs(total_sum)**2)
+        return sigma
+
+class ResultWriter:
+    def __init__(self, filename: str, format_code: int):
+        self.filename = filename
+        self.format_code = format_code
+        self.c = const.c
+
+    def write(self, frequencies: np.ndarray, rcs_values: np.ndarray):
+        print(f"Сохранение результатов в файл '{self.filename}' (Формат {self.format_code})...")
+        try:
+            if self.format_code == 2:
+                self._write_format_2_csv(frequencies, rcs_values)
+            else:
+                print(f"Ошибка: Формат вывода {self.format_code} не реализован в этом скрипте.")
+        except IOError as e:
+            print(f"Ошибка при записи файла {self.filename}: {e}", file=sys.stderr)
+        else:
+            print("Результаты успешно сохранены.")
+
+    def _write_format_2_csv(self, frequencies: np.ndarray, rcs_values: np.ndarray):
+        with open(self.filename, 'w', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f, delimiter=',')
+
+            for i, (freq, rcs) in enumerate(zip(frequencies, rcs_values)):
+                row_num = i + 1
+                writer.writerow([row_num, freq, rcs])
+
+def plot_results(frequencies_hz: np.ndarray, rcs_values_m2: np.ndarray):
+    frequencies_mhz = frequencies_hz / 1e6
+    plt.figure(figsize=(10, 6))
+    plt.plot(frequencies_mhz, rcs_values_m2)
+    plt.title(f"Зависимость ЭПР сферы от частоты (Вариант {VARIANT})")
+    plt.xlabel("Частота (МГц)")
+    plt.ylabel("ЭПР ($м^2$)") # Исправленная подпись
+    plt.grid(True)
+    plt.show()
+    print("График построен.")
+
+def main():
+    print(f"--- Запуск расчета ЭПР сферы (Вариант {VARIANT}) ---")
+    params = load_parameters(VARIANT, INPUT_FILENAME)
+    if params is None:
+        print("Завершение работы из-за ошибки загрузки параметров.")
+        return
+    diameter, freq_min, freq_max = params
+    print("Начало расчета ЭПР...")
+    calculator = RcsCalculator(diameter)
+    frequencies = np.linspace(freq_min, freq_max, NUM_POINTS)
+    rcs_results = np.array([calculator.calculate_rcs(f) for f in frequencies])
+    print("Расчет завершен.")
+
+    writer = ResultWriter(OUTPUT_FILENAME, OUTPUT_FORMAT_CODE)
+    writer.write(frequencies, rcs_results)
+    plot_results(frequencies, rcs_results)
+    print("--- Работа скрипта успешно завершена ---")
+
+if __name__ == "__main__":
+    main()
